@@ -79,7 +79,7 @@ const adminLoginLimiter = rateLimit({
 });
 
 // Serve static files
-app.use(express.static(path.join(__dirname, '.')));
+
 
 // Root route serves index.html
 app.get('/', (req, res) => {
