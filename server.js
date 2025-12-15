@@ -78,12 +78,9 @@ const adminLoginLimiter = rateLimit({
     legacyHeaders: false
 });
 
-// Serve static files
-
-
-// Root route serves index.html
+// Health check route
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    res.json({ status: 'ok', message: 'PesaHub API is running' });
 });
 const PAYNECTA_API_KEY = process.env.PAYNECTA_API_KEY;
 const PAYNECTA_EMAIL = process.env.PAYNECTA_EMAIL;
