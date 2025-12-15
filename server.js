@@ -91,7 +91,7 @@ const PAYNECTA_CODE = process.env.PAYNECTA_CODE || 'PNT_609202';
 const STATUM_CONSUMER_KEY = process.env.STATUM_CONSUMER_KEY;
 const STATUM_CONSUMER_SECRET = process.env.STATUM_CONSUMER_SECRET;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '3462Abel@#';
-const CALLBACK_BASE_URL = process.env.CALLBACK_BASE_URL || 'https://airtimesolutionbackend2.onrender.com';
+const CALLBACK_BASE_URL = process.env.CALLBACK_BASE_URL || 'https://pesahubbk.onrender.com';
 const PAYHERO_LINK = 'https://short.payhero.co.ke/s/oEvAxA8Xx6cDoBLxntShmF';
 
 function calculateBonus(amount) {
