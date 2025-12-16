@@ -29,184 +29,25 @@ pool.connect((err, client, release) => {
     }
 });
 
-async function initDatabaseTables() {
-    console.log('=== INITIALIZING DATABASE TABLES ===');
-    try {
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS users (
-                id UUID PRIMARY KEY,
-                email TEXT UNIQUE NOT NULL,
-                firebase_uid TEXT,
-                balance REAL DEFAULT 0 NOT NULL,
-                bonus_balance REAL DEFAULT 0 NOT NULL,
-                savings_balance DECIMAL(10,2) DEFAULT 0,
-                is_disabled BOOLEAN DEFAULT false NOT NULL,
-                last_login_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT NOW() NOT NULL
-            )
-        `);
-        console.log('[DB] users table ready');
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS session (
-                sid TEXT PRIMARY KEY,
-                sess JSON NOT NULL,
-                expire TIMESTAMP NOT NULL
-            )
-        `);
-        console.log('[DB] session table ready');
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS transactions (
-                id UUID PRIMARY KEY,
-                user_id UUID REFERENCES users(id),
-                type TEXT NOT NULL,
-                amount REAL NOT NULL,
-                fee REAL DEFAULT 0,
-                bonus REAL DEFAULT 0,
-                status TEXT DEFAULT 'pending' NOT NULL,
-                external_provider TEXT,
-                phone TEXT,
-                reference TEXT UNIQUE,
-                metadata JSONB,
-                created_at TIMESTAMP DEFAULT NOW() NOT NULL
-            )
-        `);
-        console.log('[DB] transactions table ready');
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS notifications (
-                id UUID PRIMARY KEY,
-                user_id UUID REFERENCES users(id),
-                scope TEXT DEFAULT 'user' NOT NULL,
-                title TEXT NOT NULL,
-                message TEXT NOT NULL,
-                is_read BOOLEAN DEFAULT false NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW() NOT NULL
-            )
-        `);
-        console.log('[DB] notifications table ready');
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        `);
-        console.log('[DB] settings table ready');
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS pending_purchases (
-                id UUID PRIMARY KEY,
-                user_id UUID REFERENCES users(id),
-                target_phone TEXT NOT NULL,
-                amount REAL NOT NULL,
-                status TEXT DEFAULT 'awaiting_funds' NOT NULL,
-                deposit_reference TEXT,
-                retry_count INTEGER DEFAULT 0,
-                initiated_at TIMESTAMP DEFAULT NOW() NOT NULL
-            )
-        `);
-        console.log('[DB] pending_purchases table ready');
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS deposit_verifications (
-                id UUID PRIMARY KEY,
-                user_id UUID REFERENCES users(id),
-                mpesa_code TEXT UNIQUE NOT NULL,
-                amount_claimed REAL DEFAULT 0,
-                status TEXT DEFAULT 'pending' NOT NULL,
-                submitted_at TIMESTAMP DEFAULT NOW() NOT NULL,
-                reviewed_by TEXT,
-                review_notes TEXT
-            )
-        `);
-        console.log('[DB] deposit_verifications table ready');
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS admin_audit_logs (
-                id UUID PRIMARY KEY,
-                admin_identifier TEXT NOT NULL,
-                action TEXT NOT NULL,
-                target_user TEXT,
-                metadata JSONB,
-                created_at TIMESTAMP DEFAULT NOW() NOT NULL
-            )
-        `);
-        console.log('[DB] admin_audit_logs table ready');
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS loan_applications (
-                id UUID PRIMARY KEY,
-                user_email TEXT,
-                applicant_phone TEXT NOT NULL,
-                applicant_name TEXT NOT NULL,
-                national_id TEXT NOT NULL,
-                loan_offer_code TEXT,
-                principal_amount NUMERIC(12,2),
-                fee_amount NUMERIC(12,2),
-                disbursement_amount NUMERIC(12,2),
-                repayment_amount NUMERIC(12,2),
-                repayment_days INTEGER,
-                company_name TEXT,
-                personal_details JSONB,
-                business_details JSONB,
-                emergency_contacts JSONB,
-                status TEXT DEFAULT 'pending' NOT NULL,
-                fee_attempts INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT NOW() NOT NULL,
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        `);
-        console.log('[DB] loan_applications table ready');
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS loan_savings (
-                id UUID PRIMARY KEY,
-                loan_application_id UUID REFERENCES loan_applications(id),
-                user_email TEXT,
-                request_id TEXT UNIQUE NOT NULL,
-                paynecta_reference TEXT,
-                amount NUMERIC(12,2) NOT NULL,
-                mpesa_phone TEXT NOT NULL,
-                mpesa_receipt TEXT,
-                status TEXT DEFAULT 'pending' NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW() NOT NULL,
-                completed_at TIMESTAMP
-            )
-        `);
-        console.log('[DB] loan_savings table ready');
-
-        await pool.query(`CREATE INDEX IF NOT EXISTS session_expire_idx ON session(expire)`);
-        console.log('[DB] session index ready');
-
-        console.log('=== ALL DATABASE TABLES INITIALIZED SUCCESSFULLY ===');
-    } catch (error) {
-        console.error('=== CRITICAL DATABASE ERROR ===');
-        console.error('Error creating tables:', error.message);
-        console.error('Full error:', error);
-    }
-}
-
 async function initDatabaseColumns() {
     try {
         await pool.query(`
             ALTER TABLE users ADD COLUMN IF NOT EXISTS savings_balance DECIMAL(10,2) DEFAULT 0
         `);
-        console.log('[DB] savings_balance column ready');
+        console.log('Database columns initialized successfully');
     } catch (error) {
-        console.log('[DB] Column init note:', error.message);
+        console.log('Database column init (may already exist):', error.message);
     }
 }
-
-initDatabaseTables().then(() => {
-    initDatabaseColumns();
-});
+initDatabaseColumns();
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
-    origin: true,
-    credentials: true
+    origin: ['https://pesahubke.onrender.com', 'http://localhost:5000', 'http://localhost:3000'],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+    exposedHeaders: ['set-cookie']
 }));
 
 app.use(express.json());
@@ -375,66 +216,51 @@ app.get('/api/loans/application-by-phone/:phone', async (req, res) => {
 app.get('/api/users/check-email/:email', async (req, res) => {
     try {
         const { email } = req.params;
-        console.log('[CHECK-EMAIL] Checking:', email);
         const result = await pool.query('SELECT id, balance, bonus_balance FROM users WHERE LOWER(email) = LOWER($1)', [email]);
         if (result.rows.length > 0) {
-            console.log('[CHECK-EMAIL] User found:', email);
             res.json({ 
                 exists: true, 
                 balance: parseFloat(result.rows[0].balance) + parseFloat(result.rows[0].bonus_balance)
             });
         } else {
-            console.log('[CHECK-EMAIL] User NOT found:', email);
             res.json({ exists: false });
         }
     } catch (error) {
-        console.error('[CHECK-EMAIL] Error:', error.message);
+        console.error('Check email error:', error);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
 app.post('/api/users/register', async (req, res) => {
-    console.log('=== USER REGISTRATION REQUEST ===');
-    console.log('Request body:', JSON.stringify(req.body));
     try {
         const { email } = req.body;
         
         if (!email) {
-            console.log('[REGISTER] Error: Email is missing');
             return res.status(400).json({ success: false, message: 'Email is required' });
         }
         
-        console.log('[REGISTER] Checking if email exists:', email);
         const emailCheck = await pool.query('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
         if (emailCheck.rows.length > 0) {
-            console.log('[REGISTER] Email already registered:', email);
             return res.status(400).json({ success: false, message: 'Email already registered' });
         }
         
         const id = uuidv4();
-        console.log('[REGISTER] Creating new user with ID:', id);
         
         await pool.query(
             `INSERT INTO users (id, email, balance, bonus_balance, is_disabled, created_at)
              VALUES ($1, $2, 0, 0, false, NOW())`,
             [id, email]
         );
-        console.log('[REGISTER] User inserted successfully');
         
         await pool.query(
             `INSERT INTO notifications (id, user_id, scope, title, message, is_read, created_at)
-             VALUES ($1, $2, 'user', 'Welcome to PesaHub Kenya! 🎉', 'Thank you for joining us. Start by depositing funds to buy and sell airtime and earn extra commission.', false, NOW())`,
+             VALUES ($1, $2, 'user', 'Welcome to Airtime Solution Kenya! 🎉', 'Thank you for joining us. Start by depositing funds to buy and sell airtime and earn extra commission. other services includes; Bulk sms(coming soon),Airtime to cash(coming soon),surveys(coming soon) and lastly Bingwa bundles(coming soon).', false, NOW())`,
             [uuidv4(), id]
         );
-        console.log('[REGISTER] Welcome notification created');
         
-        console.log('=== USER REGISTRATION SUCCESS ===');
         res.json({ success: true, message: 'User registered successfully', userId: id });
     } catch (error) {
-        console.error('=== USER REGISTRATION ERROR ===');
-        console.error('Error message:', error.message);
-        console.error('Error code:', error.code);
-        console.error('Full error:', error);
+        console.error('Register error:', error);
         res.status(500).json({ success: false, message: 'Registration failed' });
     }
 });
