@@ -1,7 +1,7 @@
 {
-  "name": "airtime-solution-kenya",
+  "name": "pesahub-kenya",
   "version": "1.0.0",
-  "description": "Buy and resell airtime in Kenya",
+  "description": "PesaHub Kenya - Buy & Resell Airtime, Loans",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
