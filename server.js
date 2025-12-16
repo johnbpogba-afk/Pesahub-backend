@@ -30,8 +30,22 @@ pool.connect((err, client, release) => {
 });
 
 app.use(helmet({ contentSecurityPolicy: false }));
+
+const allowedOrigins = [
+    'https://pesahubke.onrender.com',
+    'http://localhost:5000',
+    'http://localhost:3000'
+];
+
 app.use(cors({
-    origin: true,
+    origin: function(origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            console.log('CORS blocked origin:', origin);
+            callback(null, false);
+        }
+    },
     credentials: true
 }));
 
@@ -46,7 +60,7 @@ app.use(session({
         pool: pool,
         tableName: 'session'
     }),
-    secret: process.env.SESSION_SECRET || 'airtime-solution-kenya-secret-2024',
+    secret: process.env.SESSION_SECRET || 'airtime-solution-kenya-secret-2027',
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -1466,6 +1480,21 @@ app.get('/api/loan/payment-status/:requestId', async (req, res) => {
                     if (paynectaStatus === 'completed') {
                         tracking.status = 'completed';
                         loanPaymentTracking.set(requestId, tracking);
+                        
+                        // CRITICAL: Save to loan_savings database table
+                        try {
+                            const savingsId = uuidv4();
+                            await pool.query(
+                                `INSERT INTO loan_savings (id, mpesa_phone, amount, mpesa_receipt, status, created_at)
+                                 VALUES ($1, $2, $3, $4, 'completed', NOW())
+                                 ON CONFLICT DO NOTHING`,
+                                [savingsId, tracking.phone, tracking.amount, paymentData.mpesa_receipt || requestId]
+                            );
+                            console.log('Loan savings saved to database:', { id: savingsId, phone: tracking.phone, amount: tracking.amount });
+                        } catch (dbError) {
+                            console.error('Failed to save loan savings to database:', dbError);
+                        }
+                        
                         return res.json({ status: 'completed', success: true, mpesaCode: paymentData.mpesa_receipt });
                     } else if (paynectaStatus === 'failed' || paynectaStatus === 'cancelled') {
                         tracking.status = 'failed';
