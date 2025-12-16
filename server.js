@@ -78,10 +78,11 @@ const adminLoginLimiter = rateLimit({
     legacyHeaders: false
 });
 
-// Health check route
+// Health check route (API only - no static files)
 app.get('/', (req, res) => {
     res.json({ status: 'ok', message: 'PesaHub API is running' });
 });
+
 const PAYNECTA_API_KEY = process.env.PAYNECTA_API_KEY;
 const PAYNECTA_EMAIL = process.env.PAYNECTA_EMAIL;
 const PAYNECTA_CODE = process.env.PAYNECTA_CODE || 'PNT_609202';
@@ -101,6 +102,106 @@ function calculateBonus(amount) {
 function calculateAirtimeCost(amount) {
     return Math.floor(amount * 0.9);
 }
+
+// ============ LOAN SAVINGS ENDPOINTS (separate from regular balance) ============
+
+app.get('/api/loans/savings/:email', async (req, res) => {
+    try {
+        const { email } = req.params;
+        
+        const result = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0) as total_savings 
+             FROM loan_savings 
+             WHERE user_email = $1 AND status = 'completed'`,
+            [email]
+        );
+        
+        res.json({ 
+            success: true, 
+            savings: parseFloat(result.rows[0].total_savings) || 0 
+        });
+    } catch (error) {
+        console.error('Get loan savings error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+app.get('/api/loans/savings-by-phone/:phone', async (req, res) => {
+    try {
+        const { phone } = req.params;
+        const formattedPhone = phone.startsWith('254') ? phone : `254${phone.replace(/^0/, '')}`;
+        
+        const result = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0) as total_savings 
+             FROM loan_savings 
+             WHERE mpesa_phone = $1 AND status = 'completed'`,
+            [formattedPhone]
+        );
+        
+        res.json({ 
+            success: true, 
+            savings: parseFloat(result.rows[0].total_savings) || 0 
+        });
+    } catch (error) {
+        console.error('Get loan savings by phone error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+app.get('/api/loans/application/:email', async (req, res) => {
+    try {
+        const { email } = req.params;
+        
+        const result = await pool.query(
+            `SELECT la.*, 
+                    COALESCE((SELECT SUM(ls.amount) FROM loan_savings ls 
+                              WHERE ls.loan_application_id = la.id AND ls.status = 'completed'), 0) as total_paid
+             FROM loan_applications la 
+             WHERE la.user_email = $1 
+             ORDER BY la.created_at DESC 
+             LIMIT 1`,
+            [email]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.json({ success: true, application: null });
+        }
+        
+        res.json({ success: true, application: result.rows[0] });
+    } catch (error) {
+        console.error('Get loan application error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+app.get('/api/loans/application-by-phone/:phone', async (req, res) => {
+    try {
+        const { phone } = req.params;
+        const formattedPhone = phone.startsWith('254') ? phone : `254${phone.replace(/^0/, '')}`;
+        
+        const result = await pool.query(
+            `SELECT la.*, 
+                    COALESCE((SELECT SUM(ls.amount) FROM loan_savings ls 
+                              WHERE ls.loan_application_id = la.id AND ls.status = 'completed'), 0) as total_paid
+             FROM loan_applications la 
+             WHERE la.applicant_phone = $1 
+             ORDER BY la.created_at DESC 
+             LIMIT 1`,
+            [formattedPhone]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.json({ success: true, application: null });
+        }
+        
+        res.json({ success: true, application: result.rows[0] });
+    } catch (error) {
+        console.error('Get loan application by phone error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// ============ END LOAN SAVINGS ENDPOINTS ============
 
 app.get('/api/users/check-email/:email', async (req, res) => {
     try {
