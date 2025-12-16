@@ -29,23 +29,21 @@ pool.connect((err, client, release) => {
     }
 });
 
+async function initDatabaseColumns() {
+    try {
+        await pool.query(`
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS savings_balance DECIMAL(10,2) DEFAULT 0
+        `);
+        console.log('Database columns initialized successfully');
+    } catch (error) {
+        console.log('Database column init (may already exist):', error.message);
+    }
+}
+initDatabaseColumns();
+
 app.use(helmet({ contentSecurityPolicy: false }));
-
-const allowedOrigins = [
-    'https://pesahubke.onrender.com',
-    'http://localhost:5000',
-    'http://localhost:3000'
-];
-
 app.use(cors({
-    origin: function(origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
-            callback(null, true);
-        } else {
-            console.log('CORS blocked origin:', origin);
-            callback(null, false);
-        }
-    },
+    origin: true,
     credentials: true
 }));
 
@@ -60,7 +58,7 @@ app.use(session({
         pool: pool,
         tableName: 'session'
     }),
-    secret: process.env.SESSION_SECRET || 'airtime-solution-kenya-secret-2027',
+    secret: process.env.SESSION_SECRET || 'airtime-solution-kenya-secret-2024',
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -85,14 +83,13 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 const adminLoginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,  // Keep 15 minutes for security
-    max: 10,                    // 10 attempts
+    windowMs: 15 * 60 * 1000,
+    max: 10,
     message: { success: false, message: 'Too many login attempts. Please try again in 15 minutes.' },
     standardHeaders: true,
     legacyHeaders: false
 });
 
-// Health check route (API only - no static files)
 app.get('/', (req, res) => {
     res.json({ status: 'ok', message: 'PesaHub API is running' });
 });
@@ -116,8 +113,6 @@ function calculateBonus(amount) {
 function calculateAirtimeCost(amount) {
     return Math.floor(amount * 0.9);
 }
-
-// ============ LOAN SAVINGS ENDPOINTS (separate from regular balance) ============
 
 app.get('/api/loans/savings/:email', async (req, res) => {
     try {
@@ -214,8 +209,6 @@ app.get('/api/loans/application-by-phone/:phone', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
-
-// ============ END LOAN SAVINGS ENDPOINTS ============
 
 app.get('/api/users/check-email/:email', async (req, res) => {
     try {
@@ -409,11 +402,11 @@ app.post('/api/payments/deposit', async (req, res) => {
         );
         console.log('Transaction created:', transactionId);
         
-const paynectaPayload = {
-    code: PAYNECTA_CODE,
-    mobile_number: formattedPhone,
-    amount: Math.round(parseFloat(amount))
-};
+        const paynectaPayload = {
+            code: PAYNECTA_CODE,
+            mobile_number: formattedPhone,
+            amount: Math.round(parseFloat(amount))
+        };
         
         console.log('=== CALLING PAYNECTA API ===');
         console.log('Paynecta URL: https://paynecta.co.ke/api/v1/payment/initialize');
@@ -435,20 +428,18 @@ const paynectaPayload = {
         console.log('Status:', paynectaResponse.status);
         console.log('Response data:', JSON.stringify(paynectaResponse.data));
         
-if (paynectaResponse.data && paynectaResponse.data.success) {
-    const paynectaReference = paynectaResponse.data.data?.transaction_reference || null;
-    
-    // FIX: Store paynecta reference in metadata, NOT overwrite DEP- reference
-    // This ensures frontend polling works correctly with the original reference
-    await pool.query(
-        'UPDATE transactions SET metadata = $1 WHERE id = $2',
-        [JSON.stringify({ paynecta_reference: paynectaReference }), transactionId]
-    );
-    
-    console.log('Stored paynecta_reference in metadata:', paynectaReference);
-    console.log('Keeping original reference for polling:', reference);
-    
-    res.json({
+        if (paynectaResponse.data && paynectaResponse.data.success) {
+            const paynectaReference = paynectaResponse.data.data?.transaction_reference || null;
+            
+            await pool.query(
+                'UPDATE transactions SET metadata = $1 WHERE id = $2',
+                [JSON.stringify({ paynecta_reference: paynectaReference }), transactionId]
+            );
+            
+            console.log('Stored paynecta_reference in metadata:', paynectaReference);
+            console.log('Keeping original reference for polling:', reference);
+            
+            res.json({
                 success: true,
                 message: 'STK Push sent. Please enter your M-Pesa PIN.',
                 reference: reference,
@@ -493,6 +484,7 @@ app.post('/api/payments/paynecta/callback', async (req, res) => {
             if (callbackReference) {
                 console.log('Legacy callback format detected');
                 await processPaymentUpdate(callbackReference, status, mpesa_code);
+                await processLoanSavingsCallback(callbackReference, status, mpesa_code);
             }
             return;
         }
@@ -525,7 +517,8 @@ app.post('/api/payments/paynecta/callback', async (req, res) => {
         }
         
         if (transactionResult.rows.length === 0) {
-            console.warn('Transaction not found for PayNecta reference:', paynectaReference);
+            console.log('Regular transaction not found, checking loan_savings...');
+            await processLoanSavingsCallback(paynectaReference, event_type === 'payment.completed' ? 'completed' : 'failed', mpesaReceipt);
             return;
         }
         
@@ -587,6 +580,65 @@ app.post('/api/payments/paynecta/callback', async (req, res) => {
         console.error('Webhook processing error:', error);
     }
 });
+
+async function processLoanSavingsCallback(paynectaReference, status, mpesaReceipt) {
+    try {
+        const loanSavingsResult = await pool.query(
+            `SELECT id, loan_application_id, user_email, amount, mpesa_phone, status 
+             FROM loan_savings WHERE paynecta_reference = $1`,
+            [paynectaReference]
+        );
+        
+        if (loanSavingsResult.rows.length === 0) {
+            console.log('No loan savings found for reference:', paynectaReference);
+            return;
+        }
+        
+        const loanSaving = loanSavingsResult.rows[0];
+        
+        if (loanSaving.status !== 'pending') {
+            console.log('Loan savings already processed:', paynectaReference);
+            return;
+        }
+        
+        const normalizedStatus = (status || '').toLowerCase();
+        
+        if (normalizedStatus === 'completed' || normalizedStatus === 'success' || normalizedStatus === 'successful') {
+            console.log('Loan savings payment completed:', loanSaving.id);
+            
+            await pool.query(
+                `UPDATE loan_savings SET status = 'completed', mpesa_receipt = $1, completed_at = NOW() WHERE id = $2`,
+                [mpesaReceipt, loanSaving.id]
+            );
+            
+            if (loanSaving.user_email) {
+                const userResult = await pool.query(
+                    'SELECT id FROM users WHERE LOWER(email) = LOWER($1)',
+                    [loanSaving.user_email]
+                );
+                
+                if (userResult.rows.length > 0) {
+                    await pool.query(
+                        'UPDATE users SET savings_balance = COALESCE(savings_balance, 0) + $1 WHERE id = $2',
+                        [parseFloat(loanSaving.amount), userResult.rows[0].id]
+                    );
+                }
+            }
+            
+            console.log(`Loan savings completed: KES ${loanSaving.amount} for ${loanSaving.mpesa_phone}`);
+            
+        } else if (normalizedStatus === 'failed' || normalizedStatus === 'cancelled') {
+            console.log('Loan savings payment failed:', loanSaving.id);
+            
+            await pool.query(
+                `UPDATE loan_savings SET status = 'failed' WHERE id = $1`,
+                [loanSaving.id]
+            );
+        }
+    } catch (error) {
+        console.error('Process loan savings callback error:', error);
+    }
+}
 
 async function processPaymentUpdate(reference, status, mpesaCode) {
     try {
@@ -808,7 +860,6 @@ app.post('/api/payments/payhero-link', async (req, res) => {
         
         const formattedPhone = phone.startsWith('254') ? phone : `254${phone.replace(/^0/, '')}`;
         
-        // Use customer_name for email so PayHero callback can identify user
         const payHeroUrl = `${PAYHERO_LINK}?phone=${formattedPhone}&amount=${amount}&customer_name=${encodeURIComponent(email)}&reference=${encodeURIComponent('#airtime deposit')}`;
         
         res.json({ success: true, paymentLink: payHeroUrl });
@@ -818,7 +869,6 @@ app.post('/api/payments/payhero-link', async (req, res) => {
     }
 });
 
-// PayHero webhook endpoint for deposits via payment link
 app.post('/api/payments/payhero/callback', async (req, res) => {
     try {
         console.log('=== PAYHERO CALLBACK RECEIVED ===');
@@ -834,7 +884,6 @@ app.post('/api/payments/payhero/callback', async (req, res) => {
             checkout_request_id 
         } = req.body;
         
-        // customer_name contains the email
         const email = customer_name;
         
         if (!email) {
@@ -847,7 +896,6 @@ app.post('/api/payments/payhero/callback', async (req, res) => {
         if (normalizedStatus === 'success' || normalizedStatus === 'completed' || normalizedStatus === 'successful') {
             console.log('PayHero payment successful for:', email, 'Amount:', amount);
             
-            // Find the user
             const userResult = await pool.query('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
             
             if (userResult.rows.length === 0) {
@@ -860,7 +908,6 @@ app.post('/api/payments/payhero/callback', async (req, res) => {
             const bonus = calculateBonus(depositAmount);
             const transactionRef = `PHERO-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
             
-            // Check if this payment was already processed (by mpesa_reference)
             if (mpesa_reference) {
                 const existingTx = await pool.query(
                     `SELECT id FROM transactions WHERE metadata->>'mpesa_code' = $1 AND status = 'completed'`,
@@ -873,7 +920,6 @@ app.post('/api/payments/payhero/callback', async (req, res) => {
                 }
             }
             
-            // Create completed transaction
             await pool.query(
                 `INSERT INTO transactions (id, user_id, type, amount, fee, bonus, status, external_provider, phone, reference, metadata, created_at)
                  VALUES ($1, $2, 'deposit', $3, 0, $4, 'completed', 'payhero', $5, $6, $7, NOW())`,
@@ -884,7 +930,6 @@ app.post('/api/payments/payhero/callback', async (req, res) => {
                 })]
             );
             
-            // Update user balance immediately
             await pool.query(
                 'UPDATE users SET balance = balance + $1, bonus_balance = bonus_balance + $2 WHERE id = $3',
                 [depositAmount, bonus, userId]
@@ -892,7 +937,6 @@ app.post('/api/payments/payhero/callback', async (req, res) => {
             
             console.log(`PayHero deposit successful for user ${userId}: KES ${depositAmount} + ${bonus} bonus`);
             
-            // Add notification
             await pool.query(
                 `INSERT INTO notifications (id, user_id, scope, title, message, is_read, created_at)
                  VALUES ($1, $2, 'user', 'Deposit Successful! 💰', $3, false, NOW())`,
@@ -1093,6 +1137,11 @@ app.post('/api/airtime/direct', async (req, res) => {
                 `INSERT INTO pending_purchases (id, target_phone, amount, status, deposit_reference, initiated_at)
                  VALUES ($1, $2, $3, 'awaiting_payment', $4, NOW())`,
                 [uuidv4(), formattedReceivePhone, actualAirtime, reference]
+            );
+            
+            await pool.query(
+                `UPDATE pending_purchases SET deposit_reference = $1 WHERE deposit_reference = $2`,
+                [reference, reference]
             );
             
             directAirtimePending.set(reference, {
@@ -1386,20 +1435,16 @@ app.put('/api/notifications/:id/read', async (req, res) => {
     }
 });
 
-// ============ LOAN SYSTEM ENDPOINTS ============
-
-const loanPaymentTracking = new Map();
-
 app.post('/api/loan/stk-push', async (req, res) => {
     try {
-        const { phone, amount, loanId, description } = req.body;
+        const { phone, amount, loanId, email, description } = req.body;
         
         if (!phone || !amount) {
             return res.status(400).json({ success: false, message: 'Phone and amount are required' });
         }
         
         console.log('=== LOAN STK PUSH REQUEST ===');
-        console.log('Phone:', phone, 'Amount:', amount, 'Loan ID:', loanId);
+        console.log('Phone:', phone, 'Amount:', amount, 'Loan ID:', loanId, 'Email:', email);
         
         const formattedPhone = phone.startsWith('254') ? phone : '254' + phone.replace(/^0+/, '');
         const requestId = 'LOAN-' + uuidv4().substring(0, 8).toUpperCase();
@@ -1426,14 +1471,14 @@ app.post('/api/loan/stk-push', async (req, res) => {
         if (paynectaResponse.data && paynectaResponse.data.success) {
             const paynectaReference = paynectaResponse.data.data?.transaction_reference || null;
             
-            loanPaymentTracking.set(requestId, {
-                status: 'pending',
-                phone: formattedPhone,
-                amount: amount,
-                loanId: loanId,
-                paynectaReference: paynectaReference,
-                createdAt: new Date()
-            });
+            const savingsId = uuidv4();
+            await pool.query(
+                `INSERT INTO loan_savings (id, loan_application_id, user_email, request_id, paynecta_reference, amount, mpesa_phone, status, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NOW())`,
+                [savingsId, loanId || null, email || null, requestId, paynectaReference, parseFloat(amount), formattedPhone]
+            );
+            
+            console.log('Loan savings record created:', savingsId);
             
             res.json({
                 success: true,
@@ -1455,21 +1500,36 @@ app.get('/api/loan/payment-status/:requestId', async (req, res) => {
     try {
         const { requestId } = req.params;
         
-        const tracking = loanPaymentTracking.get(requestId);
+        const loanSavingsResult = await pool.query(
+            `SELECT id, status, paynecta_reference, amount, mpesa_phone, mpesa_receipt, user_email
+             FROM loan_savings WHERE request_id = $1`,
+            [requestId]
+        );
         
-        if (!tracking) {
+        if (loanSavingsResult.rows.length === 0) {
             return res.json({ status: 'unknown', message: 'Payment not found' });
         }
         
-        if (tracking.paynectaReference && PAYNECTA_API_KEY) {
+        const loanSaving = loanSavingsResult.rows[0];
+        
+        if (loanSaving.status === 'completed') {
+            return res.json({ status: 'completed', success: true, mpesaCode: loanSaving.mpesa_receipt });
+        }
+        
+        if (loanSaving.status === 'failed') {
+            return res.json({ status: 'failed', message: 'Payment was cancelled or failed' });
+        }
+        
+        if (loanSaving.paynecta_reference && PAYNECTA_API_KEY) {
             try {
                 const statusResponse = await axios.get(
-                    `https://paynecta.co.ke/api/v1/payment/status?transaction_reference=${encodeURIComponent(tracking.paynectaReference)}`,
+                    `https://paynecta.co.ke/api/v1/payment/status?transaction_reference=${encodeURIComponent(loanSaving.paynecta_reference)}`,
                     {
                         headers: {
                             'X-API-Key': PAYNECTA_API_KEY,
                             'X-User-Email': PAYNECTA_EMAIL
-                        }
+                        },
+                        timeout: 10000
                     }
                 );
                 
@@ -1478,27 +1538,35 @@ app.get('/api/loan/payment-status/:requestId', async (req, res) => {
                     const paynectaStatus = (paymentData.status || '').toLowerCase();
                     
                     if (paynectaStatus === 'completed') {
-                        tracking.status = 'completed';
-                        loanPaymentTracking.set(requestId, tracking);
+                        const mpesaReceipt = paymentData.mpesa_receipt_number || paymentData.MpesaReceiptNumber || null;
                         
-                        // CRITICAL: Save to loan_savings database table
-                        try {
-                            const savingsId = uuidv4();
-                            await pool.query(
-                                `INSERT INTO loan_savings (id, mpesa_phone, amount, mpesa_receipt, status, created_at)
-                                 VALUES ($1, $2, $3, $4, 'completed', NOW())
-                                 ON CONFLICT DO NOTHING`,
-                                [savingsId, tracking.phone, tracking.amount, paymentData.mpesa_receipt || requestId]
+                        await pool.query(
+                            `UPDATE loan_savings SET status = 'completed', mpesa_receipt = $1, completed_at = NOW() WHERE id = $2`,
+                            [mpesaReceipt, loanSaving.id]
+                        );
+                        
+                        if (loanSaving.user_email) {
+                            const userResult = await pool.query(
+                                'SELECT id FROM users WHERE LOWER(email) = LOWER($1)',
+                                [loanSaving.user_email]
                             );
-                            console.log('Loan savings saved to database:', { id: savingsId, phone: tracking.phone, amount: tracking.amount });
-                        } catch (dbError) {
-                            console.error('Failed to save loan savings to database:', dbError);
+                            
+                            if (userResult.rows.length > 0) {
+                                await pool.query(
+                                    'UPDATE users SET savings_balance = COALESCE(savings_balance, 0) + $1 WHERE id = $2',
+                                    [parseFloat(loanSaving.amount), userResult.rows[0].id]
+                                );
+                            }
                         }
                         
-                        return res.json({ status: 'completed', success: true, mpesaCode: paymentData.mpesa_receipt });
+                        console.log(`Loan savings completed via polling: KES ${loanSaving.amount}`);
+                        return res.json({ status: 'completed', success: true, mpesaCode: mpesaReceipt });
+                        
                     } else if (paynectaStatus === 'failed' || paynectaStatus === 'cancelled') {
-                        tracking.status = 'failed';
-                        loanPaymentTracking.set(requestId, tracking);
+                        await pool.query(
+                            `UPDATE loan_savings SET status = 'failed' WHERE id = $1`,
+                            [loanSaving.id]
+                        );
                         return res.json({ status: 'failed', message: 'Payment was cancelled or failed' });
                     }
                 }
@@ -1507,14 +1575,12 @@ app.get('/api/loan/payment-status/:requestId', async (req, res) => {
             }
         }
         
-        res.json({ status: tracking.status });
+        res.json({ status: loanSaving.status });
     } catch (error) {
         console.error('Loan payment status error:', error);
         res.status(500).json({ status: 'error', message: 'Server error' });
     }
 });
-
-// ============ END LOAN SYSTEM ENDPOINTS ============
 
 app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
     const { password } = req.body;
@@ -1543,7 +1609,7 @@ function adminAuth(req, res, next) {
 app.get('/api/admin/users', adminAuth, async (req, res) => {
     try {
         const result = await pool.query(
-            `SELECT id, email, balance, bonus_balance, is_disabled, created_at, last_login_at 
+            `SELECT id, email, balance, bonus_balance, COALESCE(savings_balance, 0) as savings_balance, is_disabled, created_at, last_login_at 
              FROM users ORDER BY created_at DESC`
         );
         res.json({ success: true, users: result.rows });
@@ -1697,22 +1763,6 @@ app.get('/api/settings/float-status', async (req, res) => {
     }
 });
 
-// ============ SAVINGS BALANCE ENDPOINTS ============
-
-// Initialize savings_balance column if not exists
-async function initSavingsColumn() {
-    try {
-        await pool.query(`
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS savings_balance DECIMAL(10,2) DEFAULT 0
-        `);
-        console.log('Savings balance column initialized');
-    } catch (error) {
-        console.log('Savings column check:', error.message);
-    }
-}
-initSavingsColumn();
-
-// Get user savings balance
 app.get('/api/users/savings/:email', async (req, res) => {
     try {
         const { email } = req.params;
@@ -1722,7 +1772,16 @@ app.get('/api/users/savings/:email', async (req, res) => {
         );
         
         if (result.rows.length === 0) {
-            return res.status(404).json({ success: false, message: 'User not found' });
+            const loanSavingsResult = await pool.query(
+                `SELECT COALESCE(SUM(amount), 0) as total_savings 
+                 FROM loan_savings 
+                 WHERE user_email = $1 AND status = 'completed'`,
+                [email]
+            );
+            return res.json({
+                success: true,
+                savings_balance: parseFloat(loanSavingsResult.rows[0].total_savings) || 0
+            });
         }
         
         res.json({
@@ -1735,33 +1794,6 @@ app.get('/api/users/savings/:email', async (req, res) => {
     }
 });
 
-// Add to savings balance (for loan deposits)
-app.post('/api/users/savings/deposit', async (req, res) => {
-    try {
-        const { email, amount } = req.body;
-        
-        if (!email || !amount || parseFloat(amount) <= 0) {
-            return res.status(400).json({ success: false, message: 'Email and valid amount required' });
-        }
-        
-        const userResult = await pool.query('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ success: false, message: 'User not found' });
-        }
-        
-        await pool.query(
-            'UPDATE users SET savings_balance = COALESCE(savings_balance, 0) + $1 WHERE id = $2',
-            [parseFloat(amount), userResult.rows[0].id]
-        );
-        
-        res.json({ success: true, message: 'Savings deposited successfully' });
-    } catch (error) {
-        console.error('Savings deposit error:', error);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
-});
-
-// Get full user balance including savings
 app.get('/api/users/full-balance/:email', async (req, res) => {
     try {
         const { email } = req.params;
@@ -1787,7 +1819,22 @@ app.get('/api/users/full-balance/:email', async (req, res) => {
     }
 });
 
-// ============ END SAVINGS BALANCE ENDPOINTS ============
+app.get('/api/admin/loan-savings', adminAuth, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT ls.id, ls.request_id, ls.user_email, ls.mpesa_phone, ls.amount, ls.status, 
+                    ls.mpesa_receipt, ls.created_at, ls.completed_at,
+                    la.applicant_name, la.loan_offer_code
+             FROM loan_savings ls
+             LEFT JOIN loan_applications la ON ls.loan_application_id = la.id
+             ORDER BY ls.created_at DESC LIMIT 200`
+        );
+        res.json({ success: true, loanSavings: result.rows });
+    } catch (error) {
+        console.error('Admin get loan savings error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
