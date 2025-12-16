@@ -42,12 +42,10 @@ async function initDatabaseColumns() {
 initDatabaseColumns();
 
 app.use(helmet({ contentSecurityPolicy: false }));
+// AFTER (fixed - matches server1)
 app.use(cors({
-    origin: ['https://pesahubke.onrender.com', 'http://localhost:5000', 'http://localhost:9000'],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
-    exposedHeaders: ['set-cookie']
+    origin: true,
+    credentials: true
 }));
 
 app.use(express.json());
