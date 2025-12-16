@@ -73,7 +73,13 @@ app.use(session({
 }));
 
 app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} - Origin: ${req.headers.origin}`);
+    console.log(`\n========== REQUEST ==========`);
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    console.log(`Origin: ${req.headers.origin || 'NO ORIGIN'}`);
+    console.log(`Cookies received: ${req.headers.cookie ? 'YES' : 'NO COOKIES'}`);
+    console.log(`Session ID: ${req.sessionID || 'NO SESSION'}`);
+    console.log(`Session data: ${JSON.stringify(req.session || {})}`);
+    console.log(`==============================\n`);
     next();
 });
 
@@ -214,53 +220,70 @@ app.get('/api/loans/application-by-phone/:phone', async (req, res) => {
 });
 
 app.get('/api/users/check-email/:email', async (req, res) => {
+    console.log('\n🔵 [CHECK-EMAIL] Checking if email exists...');
+    console.log(`🔵 [CHECK-EMAIL] Email: ${req.params.email}`);
     try {
         const { email } = req.params;
         const result = await pool.query('SELECT id, balance, bonus_balance FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+        console.log(`🔵 [CHECK-EMAIL] Query result rows: ${result.rows.length}`);
+        
         if (result.rows.length > 0) {
+            console.log(`🟢 [CHECK-EMAIL] Email EXISTS: ${email}`);
             res.json({ 
                 exists: true, 
                 balance: parseFloat(result.rows[0].balance) + parseFloat(result.rows[0].bonus_balance)
             });
         } else {
+            console.log(`🟡 [CHECK-EMAIL] Email DOES NOT EXIST: ${email}`);
             res.json({ exists: false });
         }
     } catch (error) {
-        console.error('Check email error:', error);
+        console.error('🔴 [CHECK-EMAIL] ERROR:', error.message);
+        console.error('🔴 [CHECK-EMAIL] Stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
 app.post('/api/users/register', async (req, res) => {
+    console.log('\n🔵 [REGISTER] Starting user registration...');
+    console.log('🔵 [REGISTER] Request body:', JSON.stringify(req.body));
     try {
         const { email } = req.body;
         
         if (!email) {
+            console.log('🔴 [REGISTER] ERROR: No email provided');
             return res.status(400).json({ success: false, message: 'Email is required' });
         }
         
+        console.log(`🔵 [REGISTER] Checking if email exists: ${email}`);
         const emailCheck = await pool.query('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+        
         if (emailCheck.rows.length > 0) {
+            console.log(`🟡 [REGISTER] Email already exists: ${email}`);
             return res.status(400).json({ success: false, message: 'Email already registered' });
         }
         
         const id = uuidv4();
+        console.log(`🔵 [REGISTER] Creating new user with ID: ${id}`);
         
         await pool.query(
             `INSERT INTO users (id, email, balance, bonus_balance, is_disabled, created_at)
              VALUES ($1, $2, 0, 0, false, NOW())`,
             [id, email]
         );
+        console.log(`🟢 [REGISTER] User inserted into database: ${email}`);
         
         await pool.query(
             `INSERT INTO notifications (id, user_id, scope, title, message, is_read, created_at)
              VALUES ($1, $2, 'user', 'Welcome to Airtime Solution Kenya! 🎉', 'Thank you for joining us. Start by depositing funds to buy and sell airtime and earn extra commission. other services includes; Bulk sms(coming soon),Airtime to cash(coming soon),surveys(coming soon) and lastly Bingwa bundles(coming soon).', false, NOW())`,
             [uuidv4(), id]
         );
+        console.log(`🟢 [REGISTER] Welcome notification created for: ${email}`);
         
         res.json({ success: true, message: 'User registered successfully', userId: id });
     } catch (error) {
-        console.error('Register error:', error);
+        console.error('🔴 [REGISTER] CRITICAL ERROR:', error.message);
+        console.error('🔴 [REGISTER] Stack trace:', error.stack);
         res.status(500).json({ success: false, message: 'Registration failed' });
     }
 });
@@ -282,6 +305,10 @@ app.post('/api/users/update-firebase-uid', async (req, res) => {
 });
 
 app.get('/api/users/by-email/:email', async (req, res) => {
+    console.log('\n🔵 [BY-EMAIL] Fetching user by email...');
+    console.log(`🔵 [BY-EMAIL] Email requested: ${req.params.email}`);
+    console.log(`🔵 [BY-EMAIL] Session ID: ${req.sessionID}`);
+    console.log(`🔵 [BY-EMAIL] Session data: ${JSON.stringify(req.session)}`);
     try {
         const { email } = req.params;
         const result = await pool.query(
@@ -289,19 +316,27 @@ app.get('/api/users/by-email/:email', async (req, res) => {
             [email]
         );
         
+        console.log(`🔵 [BY-EMAIL] Database query result rows: ${result.rows.length}`);
+        
         if (result.rows.length === 0) {
+            console.log(`🔴 [BY-EMAIL] User NOT FOUND in database: ${email}`);
             return res.status(404).json({ success: false, message: 'User not found' });
         }
         
+        console.log(`🟢 [BY-EMAIL] User FOUND: ${JSON.stringify(result.rows[0])}`);
+        
         if (result.rows[0].is_disabled) {
+            console.log(`🔴 [BY-EMAIL] User account is DISABLED: ${email}`);
             return res.status(403).json({ success: false, message: 'Account is disabled. Contact support.' });
         }
         
         await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [result.rows[0].id]);
+        console.log(`🟢 [BY-EMAIL] Updated last_login_at for: ${email}`);
         
         res.json({ success: true, user: result.rows[0] });
     } catch (error) {
-        console.error('Get user error:', error);
+        console.error('🔴 [BY-EMAIL] CRITICAL ERROR:', error.message);
+        console.error('🔴 [BY-EMAIL] Stack trace:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
